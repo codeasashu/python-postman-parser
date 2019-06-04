@@ -1,12 +1,14 @@
+import re
 
+# @TODO use Set instead of dicts below
 _PM_ITEM_INFO = {'name': None, 'request': None, 'response': None}
 _PM_INFO = {'_postman_id': None, 'name': None, 'description': None, 'schema': None}
+_PM_ENV = {'id': None, 'name': None, 'values': None}
+_regex = r"\{\{[a-zA-Z0-9_.]+\}\}"
 
 class PostmanParser(object):
 
-    counter = 0
-    collectionloop = []
-    originalCollection = None
+    envjson = {}
 
     def verifyCollection(self):
         return (_POSTMAN_INFO.keys() == self.item['info'].keys())
@@ -16,26 +18,56 @@ class PostmanParser(object):
         if(self.isValidItem(self.item) is False) or ('item' not in self.item):
             raise Exception("Not a valid postman collection item")
 
-        PostmanParser.originalCollection = self.item['item']
-        self.walker = PostmanCollectionWalker(self.item['item'])
+        self.walker = PostmanCollectionWalker()
+
+    # env must be a json decoded dict
+    def loadenv(self, env):
+        if not self.isValidEnv(env):
+            raise Exception("Not a valid postman env file")
+        if 'values' not in env:
+            raise Exception("Not a valid postman env file")
+
+        PostmanParser.envjson = self.convert_list_to_dict(env['values'], (["key", "value"]))
+
+    def getenv(self):
+        return PostmanParser.envjson
+
+    def convert_list_to_dict(self, json, sep=set([None, None])):
+        if(sep[0] is None or sep[0] is None):
+            raise Exception("Separator needs a key val pair. Missing key val")
+        if isinstance(json, list):
+            newkv = {}
+            for item in json:
+                if not sep[0] in item:
+                    break
+                if not sep[1] in item:
+                    break
+                newkv[item[sep[0]]] = item[sep[1]]
+            return newkv
+
+        return json
+
+
+    def getRequests(self, callback=None):
+        self.walker = PostmanCollectionWalker(callback)
+        return self.walker.getRequests(self.item['item'])
+
+    def isValid(self, prefixset, item):
+        return list(prefixset.keys()).sort() == list(item.keys() & prefixset.keys()).sort()
 
     def isValidItem(self, item):
-        return list(_PM_ITEM_INFO.keys()).sort() == list(item.keys() & _PM_ITEM_INFO.keys()).sort()
+        return self.isValid(_PM_ITEM_INFO, item)
 
-    """
-    def parseRequest(self):
-        ##
+    def isValidEnv(self, item):
+        return self.isValid(_PM_ENV, item)
 
-    def parseExamples(self):
-        ##
-
-    def parseResponse(self):
-        ##
-"""
 
 class PostmanCollectionWalker(PostmanParser):
-    def __init__(self, collection, init=False):
-        self.collection = collection
+    def __init__(self, callback=None):
+        self.func = callback
+
+    def setcbfunc(self, func):
+        self.func = func
 
     def isFolder(self, item):
         return True if 'item' in item else False
@@ -43,65 +75,89 @@ class PostmanCollectionWalker(PostmanParser):
     def isDirectRequest(self, item):
         return ('response' in item)
 
-    def walk(self, parent=None, level=0):
-        for i, item in enumerate(self.collection):
-            if(self.isFolder(item)):
-                level +=  1
-                # Process a folder
-                print("Got a folder: ", item['name'])
-                parent = item['name']
+    def getRequests(self, items, level=0, folder=None):
+        level += 1
+        for item in items:
+            if self.isFolder(item):
+                if(self.func is not None):
+                    self.func(item['name'], (level - 1))
+                s = self.getRequests(item['item'], level, item['name'])
+                yield from s
+            if self.isDirectRequest(item):
+                yield (level - 1), PostmanRequestParser(item)
+        level -= 1
 
-                print("Parent", parent, PostmanParser.originalCollection)
-                PostmanCollectionWalker(item['item']).walk(parent, level)
-            else:
-                if(self.isDirectRequest(item)):
-                    # Process a direct request
-                    print("Parent", parent)
-                    #print("Got a request:", self.collection.index(item), level, item['name'])
-                    print("Got a request:", item['name'])
-                else:
-                    print("Got nothing", item)
 
-class PostmanCollectionParser(object):
-    def __init__(self, item):
-        self.item = item
-        self.Name = None
-        self.CollectionItems = []
-        self._parseCollection()
+class PostmanRequestParser(PostmanParser):
+    def __init__(self, request):
+        self.request = request
 
     def __str__(self):
-        return self.item['name'] if 'name' in self.item else None
+        return self.getName()
 
-    def _parseCollection(self):
-        self.Name = self.item['name'] if 'name' in self.item else None
-        a = self.item if 'item' not in self.item else None
-        # This is not inside a folder but a direct request
-        for item in self.item['item']:
-            self.CollectionItems.append(PostmanCollectionItemParser(item))
+    def __getitem__(self, key):
+        return self.request[key]
 
-    def getCollectionItems(self):
-        return self.CollectionItems
-
-class PostmanCollectionItemParser(object):
-    def __init__(self, item):
-        self.item = item
-        self.Examples = []
-        self._parseCollectionItems()
-
-    def __str__(self):
-        return self.item['name'] if 'name' in self.item else None
-
-    def _parseCollectionItems(self):
-        self.Name = self.item['name'] if 'name' in self.item else None
-        for example in self.item['response']:
-            self.Examples.append(PostmanItemCollectionExample(example))
+    def getName(self):
+        return self.request['name']
 
     def getExamples(self):
-        return self.Examples
+        if 'response' in self.request:
+            for response in self.request['response']:
+                yield PostmanExampleParser(response)
 
-class PostmanItemCollectionExample(object):
+class PostmanExampleParser(PostmanParser):
     def __init__(self, example):
         self.example = example
+        self.envjson = super().getenv()
 
     def __str__(self):
-        return self.item['name'] if 'name' in self.item else None
+        return self.getName()
+
+    def replaceenv(self, value):
+        matches = re.findall(_regex, value)
+        envkeys = [key for key in PostmanParser.envjson]
+        for match in matches:
+            _key = match.strip("{{").strip("}}")
+            if _key in envkeys:
+                val = PostmanParser.envjson[_key]
+                value = value.replace(match, val)
+        return value
+
+    def getMethod(self):
+        return self.example['originalRequest']['method']
+
+    def getName(self):
+        return self.example['name'] if 'name' in self.example else None
+
+    def getHost(self):
+        if not 'originalRequest' in self.example:
+            return None
+        return self.replaceenv(self.example['originalRequest']['url']['raw'])
+
+    def getResponseCode(self):
+        return self.example['code']
+
+    def getRequestHeaders(self):
+        headers = {}
+        for header in self.example['originalRequest']['header']:
+            headers[header['key']] = self.replaceenv(header['value'])
+        return headers
+
+    def getRequestBody(self):
+        if 'body' not in self.example['originalRequest']:
+            return None
+        requestBody = self.example['originalRequest']['body']
+        mode = requestBody['mode']
+        if mode in ['formdata', 'urlencoded']:
+            body = {}
+            for item in requestBody[mode]:
+                body[item["key"]] = self.replaceenv(item["value"])
+        elif mode == "raw":
+            body = requestBody[mode]
+        return body
+
+    def getResponseBody(self):
+        return self.example['body']
+
+
