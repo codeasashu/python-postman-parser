@@ -1,5 +1,6 @@
 import requests
 
+
 class PostmanRequestManager(object):
 
     def getMethod(self, request):
@@ -20,4 +21,3 @@ class PostmanRequestManager(object):
         response = requests.request(method, url, headers=headers, data=data)
         print(response)
         return True
-
